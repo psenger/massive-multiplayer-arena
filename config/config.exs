@@ -1,34 +1,43 @@
 import Config
 
-# Configure Phoenix endpoint
 config :massive_multiplayer_arena, MassiveMultiplayerArenaWeb.Endpoint,
   url: [host: "localhost"],
-  render_errors: [
-    formats: [html: MassiveMultiplayerArenaWeb.ErrorHTML, json: MassiveMultiplayerArenaWeb.ErrorJSON],
-    layout: false
-  ],
+  render_errors: [view: MassiveMultiplayerArenaWeb.ErrorView, accepts: ~w(html json), layout: false],
   pubsub_server: MassiveMultiplayerArena.PubSub,
-  live_view: [signing_salt: "game_arena_salt"]
+  live_view: [signing_salt: "YourSigningSalt"]
 
-# Configure logger
+config :massive_multiplayer_arena,
+  ecto_repos: [],
+  generators: [context_app: false]
+
+config :phoenix, :json_library, Jason
+
 config :logger, :console,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id, :game_id, :player_id]
-
-# Configure Phoenix generators
-config :phoenix, :json_library, Jason
+  metadata: [:request_id]
 
 # Game engine configuration
 config :massive_multiplayer_arena, :game_engine,
   tick_rate: 60,
-  max_players_per_game: 10,
-  game_timeout: 600_000
+  max_players_per_match: 10,
+  match_timeout: 600_000,
+  physics_steps_per_tick: 4
 
 # Matchmaking configuration
 config :massive_multiplayer_arena, :matchmaking,
-  max_skill_difference: 200,
-  matchmaking_timeout: 30_000,
-  min_players: 2
+  queue_timeout: 30_000,
+  skill_variance_threshold: 200,
+  latency_threshold: 150,
+  min_players: 2,
+  max_players: 10
 
-# Import environment specific config
+# Clustering configuration
+config :libcluster,
+  topologies: [
+    arena_cluster: [
+      strategy: Cluster.Strategy.Epmd,
+      config: [hosts: []]
+    ]
+  ]
+
 import_config "#{config_env()}.exs"
