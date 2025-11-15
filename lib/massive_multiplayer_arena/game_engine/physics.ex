@@ -1,93 +1,106 @@
 defmodule MassiveMultiplayerArena.GameEngine.Physics do
   @moduledoc """
-  Physics engine for handling movement, velocity, and basic physics calculations
-  in the game world.
+  Physics engine for handling movement, velocity, and forces.
   """
 
-  alias MassiveMultiplayerArena.GameEngine.Player
+  alias MassiveMultiplayerArena.GameEngine.{Player, WorldBounds}
 
-  @type vector :: {float(), float()}
-  @type position :: vector()
-  @type velocity :: vector()
+  @gravity 9.8
+  @friction 0.95
+  @max_velocity 500.0
+  @epsilon 0.001
 
   @doc """
-  Updates player position based on velocity and time delta.
+  Updates player position based on velocity and physics.
   """
-  @spec update_position(Player.t(), float()) :: Player.t()
   def update_position(%Player{} = player, delta_time) do
-    {pos_x, pos_y} = player.position
-    {vel_x, vel_y} = player.velocity
+    try do
+      # Apply velocity with bounds checking
+      new_x = player.position.x + (player.velocity.x * delta_time)
+      new_y = player.position.y + (player.velocity.y * delta_time)
 
-    new_x = pos_x + vel_x * delta_time
-    new_y = pos_y + vel_y * delta_time
+      # Clamp position to world bounds to prevent overflow
+      clamped_position = %{
+        x: clamp_coordinate(new_x, WorldBounds.min_x(), WorldBounds.max_x()),
+        y: clamp_coordinate(new_y, WorldBounds.min_y(), WorldBounds.max_y())
+      }
 
-    %Player{player | position: {new_x, new_y}}
-  end
-
-  @doc """
-  Calculates distance between two positions.
-  """
-  @spec distance(position(), position()) :: float()
-  def distance({x1, y1}, {x2, y2}) do
-    dx = x2 - x1
-    dy = y2 - y1
-    :math.sqrt(dx * dx + dy * dy)
-  end
-
-  @doc """
-  Normalizes a vector to unit length.
-  """
-  @spec normalize(vector()) :: vector()
-  def normalize({x, y}) do
-    magnitude = :math.sqrt(x * x + y * y)
-    if magnitude > 0 do
-      {x / magnitude, y / magnitude}
-    else
-      {0.0, 0.0}
+      # Update player with new position
+      %{player | position: clamped_position}
+    rescue
+      ArithmeticError ->
+        # Reset to safe position on arithmetic overflow
+        %{player | position: %{x: 0.0, y: 0.0}, velocity: %{x: 0.0, y: 0.0}}
     end
   end
 
   @doc """
-  Applies friction to velocity, reducing it over time.
+  Applies force to player velocity.
   """
-  @spec apply_friction(velocity(), float(), float()) :: velocity()
-  def apply_friction({vel_x, vel_y}, friction_coefficient, delta_time) do
-    friction_factor = 1.0 - (friction_coefficient * delta_time)
-    friction_factor = max(0.0, friction_factor)
-    {vel_x * friction_factor, vel_y * friction_factor}
+  def apply_force(%Player{} = player, force_x, force_y, delta_time) do
+    # Calculate new velocity with force application
+    new_vel_x = player.velocity.x + (force_x * delta_time)
+    new_vel_y = player.velocity.y + (force_y * delta_time)
+
+    # Apply friction and clamp velocity
+    final_vel_x = clamp_velocity(new_vel_x * @friction)
+    final_vel_y = clamp_velocity(new_vel_y * @friction)
+
+    # Zero out very small velocities to prevent floating point drift
+    velocity = %{
+      x: if(abs(final_vel_x) < @epsilon, do: 0.0, else: final_vel_x),
+      y: if(abs(final_vel_y) < @epsilon, do: 0.0, else: final_vel_y)
+    }
+
+    %{player | velocity: velocity}
   end
 
   @doc """
-  Calculates velocity needed to move towards a target position.
+  Calculates impulse from collision.
   """
-  @spec velocity_towards(position(), position(), float()) :: velocity()
-  def velocity_towards(from_pos, to_pos, speed) do
-    {dx, dy} = vector_subtract(to_pos, from_pos)
-    {norm_x, norm_y} = normalize({dx, dy})
-    {norm_x * speed, norm_y * speed}
+  def calculate_collision_impulse(player1, player2, collision_normal) do
+    relative_velocity = %{
+      x: player1.velocity.x - player2.velocity.x,
+      y: player1.velocity.y - player2.velocity.y
+    }
+
+    # Calculate relative velocity along collision normal
+    velocity_along_normal = 
+      relative_velocity.x * collision_normal.x + relative_velocity.y * collision_normal.y
+
+    # Don't resolve if velocities are separating
+    if velocity_along_normal > 0 do
+      {%{x: 0.0, y: 0.0}, %{x: 0.0, y: 0.0}}
+    else
+      # Calculate restitution (bounciness)
+      restitution = min(player1.restitution || 0.6, player2.restitution || 0.6)
+      
+      # Calculate impulse scalar
+      impulse_scalar = -(1 + restitution) * velocity_along_normal / 2
+      
+      # Apply impulse
+      impulse = %{
+        x: impulse_scalar * collision_normal.x,
+        y: impulse_scalar * collision_normal.y
+      }
+
+      {impulse, %{x: -impulse.x, y: -impulse.y}}
+    end
   end
 
-  @doc """
-  Subtracts one vector from another.
-  """
-  @spec vector_subtract(vector(), vector()) :: vector()
-  def vector_subtract({x1, y1}, {x2, y2}) do
-    {x1 - x2, y1 - y2}
+  defp clamp_coordinate(value, min_val, max_val) when is_number(value) and is_number(min_val) and is_number(max_val) do
+    value
+    |> max(min_val)
+    |> min(max_val)
   end
 
-  @doc """
-  Adds two vectors together.
-  """
-  @spec vector_add(vector(), vector()) :: vector()
-  def vector_add({x1, y1}, {x2, y2}) do
-    {x1 + x2, y1 + y2}
+  defp clamp_coordinate(_value, min_val, _max_val), do: min_val
+
+  defp clamp_velocity(velocity) when is_number(velocity) do
+    velocity
+    |> max(-@max_velocity)
+    |> min(@max_velocity)
   end
 
-  @doc """
-  Multiplies a vector by a scalar value.
-  """
-  @spec vector_multiply(vector(), float()) :: vector()
-  def vector_multiply({x, y}, scalar) do
-    {x * scalar, y * scalar}
-  end
+  defp clamp_velocity(_velocity), do: 0.0
 end

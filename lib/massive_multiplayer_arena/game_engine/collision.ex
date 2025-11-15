@@ -1,54 +1,119 @@
 defmodule MassiveMultiplayerArena.GameEngine.Collision do
   @moduledoc """
-  Handles collision detection between players and arena boundaries.
+  Collision detection system for game entities.
   """
 
   alias MassiveMultiplayerArena.GameEngine.Player
 
-  @player_radius 10
-
   @doc """
-  Checks if a position is within arena bounds.
+  Checks if two players are colliding using circular collision detection.
   """
-  @spec within_bounds?(%{x: float(), y: float()}, %{width: integer(), height: integer()}) :: boolean()
-  def within_bounds?(%{x: x, y: y}, %{width: width, height: height}) do
-    x >= @player_radius and x <= width - @player_radius and
-    y >= @player_radius and y <= height - @player_radius
+  def check_collision(%Player{} = player1, %Player{} = player2) do
+    case safe_distance_calculation(player1.position, player2.position) do
+      {:ok, distance} ->
+        collision_distance = player1.radius + player2.radius
+        distance <= collision_distance
+      
+      {:error, _reason} ->
+        false
+    end
   end
 
   @doc """
-  Clamps position to arena bounds.
+  Calculates collision normal between two players.
   """
-  @spec clamp_to_bounds(%{x: float(), y: float()}, %{width: integer(), height: integer()}) :: %{x: float(), y: float()}
-  def clamp_to_bounds(%{x: x, y: y}, %{width: width, height: height}) do
-    clamped_x = max(@player_radius, min(x, width - @player_radius))
-    clamped_y = max(@player_radius, min(y, height - @player_radius))
-    %{x: clamped_x, y: clamped_y}
+  def collision_normal(%Player{} = player1, %Player{} = player2) do
+    case safe_vector_calculation(player1.position, player2.position) do
+      {:ok, normal} -> normal
+      {:error, _reason} -> %{x: 1.0, y: 0.0}  # Default normal
+    end
   end
 
   @doc """
-  Calculates distance between two positions.
+  Separates two overlapping players to prevent intersection.
   """
-  @spec distance(%{x: float(), y: float()}, %{x: float(), y: float()}) :: float()
-  def distance(%{x: x1, y: y1}, %{x: x2, y: y2}) do
-    dx = x2 - x1
-    dy = y2 - y1
-    :math.sqrt(dx * dx + dy * dy)
+  def separate_players(%Player{} = player1, %Player{} = player2) do
+    case safe_distance_calculation(player1.position, player2.position) do
+      {:ok, distance} when distance > 0 ->
+        overlap = (player1.radius + player2.radius) - distance
+        
+        if overlap > 0 do
+          # Calculate separation vector
+          dx = player2.position.x - player1.position.x
+          dy = player2.position.y - player1.position.y
+          
+          # Normalize and apply separation
+          separation_factor = overlap / (2 * distance)
+          separation_x = dx * separation_factor
+          separation_y = dy * separation_factor
+          
+          # Update positions
+          updated_player1 = %{player1 | 
+            position: %{
+              x: player1.position.x - separation_x,
+              y: player1.position.y - separation_y
+            }
+          }
+          
+          updated_player2 = %{player2 |
+            position: %{
+              x: player2.position.x + separation_x,
+              y: player2.position.y + separation_y
+            }
+          }
+          
+          {updated_player1, updated_player2}
+        else
+          {player1, player2}
+        end
+      
+      _ ->
+        # If distance calculation fails, apply minimal separation
+        minimal_separation = 1.0
+        updated_player1 = %{player1 |
+          position: %{
+            x: player1.position.x - minimal_separation,
+            y: player1.position.y
+          }
+        }
+        
+        updated_player2 = %{player2 |
+          position: %{
+            x: player2.position.x + minimal_separation,
+            y: player2.position.y
+          }
+        }
+        
+        {updated_player1, updated_player2}
+    end
   end
 
-  @doc """
-  Checks if two players are colliding.
-  """
-  @spec players_colliding?(Player.t(), Player.t()) :: boolean()
-  def players_colliding?(%Player{position: pos1}, %Player{position: pos2}) do
-    distance(pos1, pos2) <= @player_radius * 2
+  defp safe_distance_calculation(pos1, pos2) do
+    try do
+      dx = pos2.x - pos1.x
+      dy = pos2.y - pos1.y
+      distance = :math.sqrt(dx * dx + dy * dy)
+      
+      if is_number(distance) and distance >= 0 do
+        {:ok, distance}
+      else
+        {:error, :invalid_distance}
+      end
+    rescue
+      ArithmeticError -> {:error, :arithmetic_error}
+      _ -> {:error, :unknown_error}
+    end
   end
 
-  @doc """
-  Checks if a player is within attack range of another player.
-  """
-  @spec within_attack_range?(Player.t(), Player.t(), float()) :: boolean()
-  def within_attack_range?(%Player{position: pos1}, %Player{position: pos2}, range \\ 50.0) do
-    distance(pos1, pos2) <= range
+  defp safe_vector_calculation(pos1, pos2) do
+    case safe_distance_calculation(pos1, pos2) do
+      {:ok, distance} when distance > 0 ->
+        dx = pos2.x - pos1.x
+        dy = pos2.y - pos1.y
+        {:ok, %{x: dx / distance, y: dy / distance}}
+      
+      _ ->
+        {:error, :invalid_vector}
+    end
   end
 end
