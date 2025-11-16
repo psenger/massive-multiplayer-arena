@@ -1,88 +1,79 @@
 defmodule MassiveMultiplayerArena.GameEngine.WorldBounds do
   @moduledoc """
-  Handles world boundaries and ensures entities stay within the game arena.
+  Manages world boundaries and position validation for the game arena.
   """
 
-  alias MassiveMultiplayerArena.GameEngine.{Player, Physics}
-
-  @type bounds :: %{
-    min_x: float(),
-    max_x: float(),
-    min_y: float(),
-    max_y: float()
-  }
-
-  @default_bounds %{
-    min_x: 0.0,
-    max_x: 1000.0,
-    min_y: 0.0,
-    max_y: 1000.0
-  }
+  @world_width 2000
+  @world_height 2000
+  @player_radius 25
 
   @doc """
-  Returns the default world bounds.
+  Checks if a position is within the world boundaries.
   """
-  @spec default_bounds() :: bounds()
-  def default_bounds, do: @default_bounds
+  def within_bounds?(position) when is_map(position) do
+    return false if not Map.has_key?(position, :x) or not Map.has_key?(position, :y)
+    return false if not is_number(position.x) or not is_number(position.y)
+    
+    position.x >= @player_radius and
+    position.x <= (@world_width - @player_radius) and
+    position.y >= @player_radius and
+    position.y <= (@world_height - @player_radius)
+  end
+
+  def within_bounds?(_), do: false
 
   @doc """
-  Checks if a position is within the world bounds.
+  Clamps a position to stay within world boundaries.
   """
-  @spec within_bounds?(Physics.position(), bounds()) :: boolean()
-  def within_bounds?({x, y}, bounds) do
-    x >= bounds.min_x and x <= bounds.max_x and
-    y >= bounds.min_y and y <= bounds.max_y
+  def clamp_position(position) when is_map(position) do
+    return %{x: 0, y: 0} if not Map.has_key?(position, :x) or not Map.has_key?(position, :y)
+    return %{x: 0, y: 0} if not is_number(position.x) or not is_number(position.y)
+    
+    x = position.x
+    |> max(@player_radius)
+    |> min(@world_width - @player_radius)
+    
+    y = position.y
+    |> max(@player_radius)
+    |> min(@world_height - @player_radius)
+    
+    %{x: x, y: y}
+  end
+
+  def clamp_position(_), do: %{x: @player_radius, y: @player_radius}
+
+  @doc """
+  Gets the world dimensions.
+  """
+  def get_dimensions do
+    %{width: @world_width, height: @world_height}
   end
 
   @doc """
-  Clamps a position to stay within world bounds.
+  Generates a random position within the world boundaries.
   """
-  @spec clamp_position(Physics.position(), bounds()) :: Physics.position()
-  def clamp_position({x, y}, bounds) do
-    clamped_x = max(bounds.min_x, min(bounds.max_x, x))
-    clamped_y = max(bounds.min_y, min(bounds.max_y, y))
-    {clamped_x, clamped_y}
+  def random_position do
+    x = @player_radius + :rand.uniform(@world_width - (2 * @player_radius))
+    y = @player_radius + :rand.uniform(@world_height - (2 * @player_radius))
+    %{x: x, y: y}
   end
 
   @doc """
-  Applies world bounds to a player, clamping their position if needed.
+  Calculates the distance from a position to the nearest boundary.
   """
-  @spec apply_bounds(Player.t(), bounds()) :: Player.t()
-  def apply_bounds(%Player{} = player, bounds \\ @default_bounds) do
-    clamped_position = clamp_position(player.position, bounds)
+  def distance_to_boundary(position) when is_map(position) do
+    return 0 if not Map.has_key?(position, :x) or not Map.has_key?(position, :y)
+    return 0 if not is_number(position.x) or not is_number(position.y)
     
-    # If position was clamped, also zero out velocity in the clamped direction
-    new_velocity = 
-      if clamped_position != player.position do
-        {pos_x, pos_y} = player.position
-        {clamped_x, clamped_y} = clamped_position
-        {vel_x, vel_y} = player.velocity
-        
-        new_vel_x = if clamped_x != pos_x, do: 0.0, else: vel_x
-        new_vel_y = if clamped_y != pos_y, do: 0.0, else: vel_y
-        
-        {new_vel_x, new_vel_y}
-      else
-        player.velocity
-      end
+    distances = [
+      position.x - @player_radius,  # left boundary
+      (@world_width - @player_radius) - position.x,  # right boundary
+      position.y - @player_radius,  # top boundary
+      (@world_height - @player_radius) - position.y  # bottom boundary
+    ]
     
-    %Player{player | position: clamped_position, velocity: new_velocity}
+    Enum.min(distances)
   end
 
-  @doc """
-  Calculates spawn points within the world bounds.
-  """
-  @spec random_spawn_point(bounds()) :: Physics.position()
-  def random_spawn_point(bounds \\ @default_bounds) do
-    # Add some padding from edges
-    padding = 50.0
-    
-    x_range = bounds.max_x - bounds.min_x - (2 * padding)
-    y_range = bounds.max_y - bounds.min_y - (2 * padding)
-    
-    x = bounds.min_x + padding + (:rand.uniform() * x_range)
-    y = bounds.min_y + padding + (:rand.uniform() * y_range)
-    
-    {x, y}
-  end
+  def distance_to_boundary(_), do: 0
 end

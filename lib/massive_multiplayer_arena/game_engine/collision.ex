@@ -1,119 +1,102 @@
 defmodule MassiveMultiplayerArena.GameEngine.Collision do
   @moduledoc """
-  Collision detection system for game entities.
+  Handles collision detection between players and projectiles in the game world.
   """
 
   alias MassiveMultiplayerArena.GameEngine.Player
+  alias MassiveMultiplayerArena.GameEngine.WorldBounds
+
+  @player_radius 25
+  @projectile_radius 5
 
   @doc """
-  Checks if two players are colliding using circular collision detection.
+  Detects collision between two players.
   """
-  def check_collision(%Player{} = player1, %Player{} = player2) do
-    case safe_distance_calculation(player1.position, player2.position) do
-      {:ok, distance} ->
-        collision_distance = player1.radius + player2.radius
-        distance <= collision_distance
-      
-      {:error, _reason} ->
-        false
-    end
+  def player_collision?(%Player{} = player1, %Player{} = player2) do
+    return false if player1.id == player2.id
+    return false if player1.health <= 0 or player2.health <= 0
+    
+    distance = calculate_distance(player1.position, player2.position)
+    distance <= (@player_radius * 2)
   end
 
   @doc """
-  Calculates collision normal between two players.
+  Detects collision between a player and a projectile.
   """
-  def collision_normal(%Player{} = player1, %Player{} = player2) do
-    case safe_vector_calculation(player1.position, player2.position) do
-      {:ok, normal} -> normal
-      {:error, _reason} -> %{x: 1.0, y: 0.0}  # Default normal
-    end
+  def projectile_collision?(%Player{} = player, projectile) when is_map(projectile) do
+    return false if player.health <= 0
+    return false if projectile.owner_id == player.id
+    return false if not Map.has_key?(projectile, :position) or not Map.has_key?(projectile, :active)
+    return false if not projectile.active
+    
+    distance = calculate_distance(player.position, projectile.position)
+    distance <= (@player_radius + @projectile_radius)
   end
 
   @doc """
-  Separates two overlapping players to prevent intersection.
+  Checks if a position is within the world boundaries.
   """
-  def separate_players(%Player{} = player1, %Player{} = player2) do
-    case safe_distance_calculation(player1.position, player2.position) do
-      {:ok, distance} when distance > 0 ->
-        overlap = (player1.radius + player2.radius) - distance
-        
-        if overlap > 0 do
-          # Calculate separation vector
-          dx = player2.position.x - player1.position.x
-          dy = player2.position.y - player1.position.y
-          
-          # Normalize and apply separation
-          separation_factor = overlap / (2 * distance)
-          separation_x = dx * separation_factor
-          separation_y = dy * separation_factor
-          
-          # Update positions
-          updated_player1 = %{player1 | 
-            position: %{
-              x: player1.position.x - separation_x,
-              y: player1.position.y - separation_y
-            }
-          }
-          
-          updated_player2 = %{player2 |
-            position: %{
-              x: player2.position.x + separation_x,
-              y: player2.position.y + separation_y
-            }
-          }
-          
-          {updated_player1, updated_player2}
-        else
-          {player1, player2}
-        end
-      
-      _ ->
-        # If distance calculation fails, apply minimal separation
-        minimal_separation = 1.0
-        updated_player1 = %{player1 |
-          position: %{
-            x: player1.position.x - minimal_separation,
-            y: player1.position.y
-          }
-        }
-        
-        updated_player2 = %{player2 |
-          position: %{
-            x: player2.position.x + minimal_separation,
-            y: player2.position.y
-          }
-        }
-        
-        {updated_player1, updated_player2}
-    end
+  def within_bounds?(position) when is_map(position) do
+    return false if not Map.has_key?(position, :x) or not Map.has_key?(position, :y)
+    return false if not is_number(position.x) or not is_number(position.y)
+    
+    WorldBounds.within_bounds?(position)
   end
 
-  defp safe_distance_calculation(pos1, pos2) do
-    try do
-      dx = pos2.x - pos1.x
-      dy = pos2.y - pos1.y
+  @doc """
+  Resolves collision between two players by separating them.
+  """
+  def resolve_player_collision(%Player{} = player1, %Player{} = player2) do
+    if player_collision?(player1, player2) do
+      # Calculate separation vector
+      dx = player2.position.x - player1.position.x
+      dy = player2.position.y - player1.position.y
       distance = :math.sqrt(dx * dx + dy * dy)
       
-      if is_number(distance) and distance >= 0 do
-        {:ok, distance}
+      # Avoid division by zero
+      if distance > 0 do
+        overlap = (@player_radius * 2) - distance
+        separation_x = (dx / distance) * (overlap / 2)
+        separation_y = (dy / distance) * (overlap / 2)
+        
+        player1_pos = %{
+          x: max(0, player1.position.x - separation_x),
+          y: max(0, player1.position.y - separation_y)
+        }
+        
+        player2_pos = %{
+          x: max(0, player2.position.x + separation_x),
+          y: max(0, player2.position.y + separation_y)
+        }
+        
+        # Ensure positions are within bounds
+        player1_pos = WorldBounds.clamp_position(player1_pos)
+        player2_pos = WorldBounds.clamp_position(player2_pos)
+        
+        {
+          %{player1 | position: player1_pos},
+          %{player2 | position: player2_pos}
+        }
       else
-        {:error, :invalid_distance}
+        {player1, player2}
       end
-    rescue
-      ArithmeticError -> {:error, :arithmetic_error}
-      _ -> {:error, :unknown_error}
+    else
+      {player1, player2}
     end
   end
 
-  defp safe_vector_calculation(pos1, pos2) do
-    case safe_distance_calculation(pos1, pos2) do
-      {:ok, distance} when distance > 0 ->
-        dx = pos2.x - pos1.x
-        dy = pos2.y - pos1.y
-        {:ok, %{x: dx / distance, y: dy / distance}}
-      
-      _ ->
-        {:error, :invalid_vector}
-    end
+  @doc """
+  Calculates the distance between two positions.
+  """
+  defp calculate_distance(pos1, pos2) do
+    return 0 if not is_map(pos1) or not is_map(pos2)
+    return 0 if not Map.has_key?(pos1, :x) or not Map.has_key?(pos1, :y)
+    return 0 if not Map.has_key?(pos2, :x) or not Map.has_key?(pos2, :y)
+    return 0 if not is_number(pos1.x) or not is_number(pos1.y)
+    return 0 if not is_number(pos2.x) or not is_number(pos2.y)
+    
+    dx = pos1.x - pos2.x
+    dy = pos1.y - pos2.y
+    :math.sqrt(dx * dx + dy * dy)
   end
 end
