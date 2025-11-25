@@ -1,191 +1,220 @@
 defmodule MassiveMultiplayerArena.GameEngine.GameState do
   @moduledoc """
-  Manages the complete state of a game session including players,
-  projectiles, power-ups, and game events.
+  Manages the complete state of a game instance with optimized updates.
   """
 
-  alias MassiveMultiplayerArena.GameEngine.Player
-
-  @max_players 16
+  alias MassiveMultiplayerArena.GameEngine.{Player, Projectile, PowerUp}
 
   defstruct [
     :game_id,
-    :status,
-    :created_at,
-    :updated_at,
-    players: %{},
-    projectiles: [],
-    powerups: [],
-    events: [],
-    match_time: 0,
-    score_limit: 50,
-    time_limit: 600  # 10 minutes in seconds
+    :players,
+    :projectiles,
+    :power_ups,
+    :tick_count,
+    :started_at,
+    :last_update,
+    :delta_cache,
+    :update_queue
   ]
 
   @type t :: %__MODULE__{
     game_id: String.t(),
-    status: :waiting | :active | :finished,
-    created_at: DateTime.t(),
-    updated_at: DateTime.t(),
     players: %{String.t() => Player.t()},
-    projectiles: list(),
-    powerups: list(),
-    events: list(),
-    match_time: non_neg_integer(),
-    score_limit: pos_integer(),
-    time_limit: pos_integer()
+    projectiles: %{String.t() => Projectile.t()},
+    power_ups: %{String.t() => PowerUp.t()},
+    tick_count: non_neg_integer(),
+    started_at: DateTime.t(),
+    last_update: DateTime.t(),
+    delta_cache: map(),
+    update_queue: list()
   }
 
-  def new(game_id \\ nil) do
+  def new(game_id) do
     now = DateTime.utc_now()
     
     %__MODULE__{
-      game_id: game_id || generate_game_id(),
-      status: :waiting,
-      created_at: now,
-      updated_at: now
+      game_id: game_id,
+      players: %{},
+      projectiles: %{},
+      power_ups: %{},
+      tick_count: 0,
+      started_at: now,
+      last_update: now,
+      delta_cache: %{},
+      update_queue: []
     }
   end
 
-  def add_player(%__MODULE__{players: players} = game_state, %Player{} = player) do
-    cond do
-      map_size(players) >= @max_players ->
-        {:error, :game_full}
+  def add_player(state, player) do
+    new_players = Map.put(state.players, player.id, player)
+    delta = %{type: :player_joined, player_id: player.id, player: player}
+    
+    state
+    |> Map.put(:players, new_players)
+    |> queue_update(delta)
+  end
+
+  def update_player(state, player_id, updates) do
+    case Map.get(state.players, player_id) do
+      nil -> state
+      player ->
+        updated_player = struct(player, updates)
+        new_players = Map.put(state.players, player_id, updated_player)
         
-      Map.has_key?(players, player.id) ->
-        {:error, :player_already_exists}
+        # Only create delta for changed fields
+        changed_fields = get_changed_fields(player, updated_player)
         
-      true ->
-        updated_players = Map.put(players, player.id, player)
-        updated_state = %{game_state | 
-          players: updated_players,
-          updated_at: DateTime.utc_now()
-        }
-        
-        # Start game if we have enough players
-        if map_size(updated_players) >= 2 and game_state.status == :waiting do
-          %{updated_state | status: :active}
+        if changed_fields != %{} do
+          delta = %{
+            type: :player_updated,
+            player_id: player_id,
+            changes: changed_fields
+          }
+          
+          state
+          |> Map.put(:players, new_players)
+          |> queue_update(delta)
         else
-          updated_state
+          Map.put(state, :players, new_players)
         end
     end
   end
 
-  def remove_player(%__MODULE__{players: players} = game_state, player_id) do
-    if Map.has_key?(players, player_id) do
-      updated_players = Map.delete(players, player_id)
-      updated_state = %{game_state | 
-        players: updated_players,
-        updated_at: DateTime.utc_now()
-      }
-      
-      # End game if not enough players remain
-      if map_size(updated_players) < 2 and game_state.status == :active do
-        %{updated_state | status: :finished}
-      else
-        updated_state
-      end
-    else
-      game_state
-    end
-  end
-
-  def update_player_input(%__MODULE__{players: players} = game_state, player_id, input) do
-    case Map.get(players, player_id) do
-      nil -> 
-        game_state
+  def remove_player(state, player_id) do
+    case Map.get(state.players, player_id) do
+      nil -> state
+      _player ->
+        new_players = Map.delete(state.players, player_id)
+        delta = %{type: :player_left, player_id: player_id}
         
-      player ->
-        updated_player = Player.update_input(player, input)
-        updated_players = Map.put(players, player_id, updated_player)
+        state
+        |> Map.put(:players, new_players)
+        |> queue_update(delta)
+    end
+  end
+
+  def add_projectile(state, projectile) do
+    new_projectiles = Map.put(state.projectiles, projectile.id, projectile)
+    delta = %{type: :projectile_created, projectile: projectile}
+    
+    state
+    |> Map.put(:projectiles, new_projectiles)
+    |> queue_update(delta)
+  end
+
+  def update_projectile(state, projectile_id, updates) do
+    case Map.get(state.projectiles, projectile_id) do
+      nil -> state
+      projectile ->
+        updated_projectile = struct(projectile, updates)
+        new_projectiles = Map.put(state.projectiles, projectile_id, updated_projectile)
         
-        %{game_state | 
-          players: updated_players,
-          updated_at: DateTime.utc_now()
-        }
+        changed_fields = get_changed_fields(projectile, updated_projectile)
+        
+        if changed_fields != %{} do
+          delta = %{
+            type: :projectile_updated,
+            projectile_id: projectile_id,
+            changes: changed_fields
+          }
+          
+          state
+          |> Map.put(:projectiles, new_projectiles)
+          |> queue_update(delta)
+        else
+          Map.put(state, :projectiles, new_projectiles)
+        end
     end
   end
 
-  def get_player(%__MODULE__{players: players}, player_id) do
-    Map.get(players, player_id)
-  end
-
-  def list_players(%__MODULE__{players: players}) do
-    Map.values(players)
-  end
-
-  def player_count(%__MODULE__{players: players}) do
-    map_size(players)
-  end
-
-  def can_start_game?(%__MODULE__{players: players, status: status}) do
-    status == :waiting and map_size(players) >= 2
-  end
-
-  def is_game_full?(%__MODULE__{players: players}) do
-    map_size(players) >= @max_players
-  end
-
-  def is_game_empty?(%__MODULE__{players: players}) do
-    map_size(players) == 0
-  end
-
-  def add_event(%__MODULE__{events: events} = game_state, event) do
-    event_with_timestamp = Map.put(event, :timestamp, DateTime.utc_now())
-    updated_events = [event_with_timestamp | Enum.take(events, 99)]  # Keep last 100 events
-    
-    %{game_state | 
-      events: updated_events,
-      updated_at: DateTime.utc_now()
-    }
-  end
-
-  def update_match_time(%__MODULE__{} = game_state, delta_time) do
-    new_time = game_state.match_time + delta_time
-    
-    updated_state = %{game_state | 
-      match_time: new_time,
-      updated_at: DateTime.utc_now()
-    }
-    
-    # Check if time limit exceeded
-    if new_time >= game_state.time_limit and game_state.status == :active do
-      %{updated_state | status: :finished}
-    else
-      updated_state
+  def remove_projectile(state, projectile_id) do
+    case Map.get(state.projectiles, projectile_id) do
+      nil -> state
+      _projectile ->
+        new_projectiles = Map.delete(state.projectiles, projectile_id)
+        delta = %{type: :projectile_destroyed, projectile_id: projectile_id}
+        
+        state
+        |> Map.put(:projectiles, new_projectiles)
+        |> queue_update(delta)
     end
   end
 
-  def check_win_condition(%__MODULE__{players: players, score_limit: score_limit} = game_state) do
-    winner = players
-             |> Map.values()
-             |> Enum.find(&(&1.score >= score_limit))
+  def tick(state) do
+    now = DateTime.utc_now()
     
-    if winner and game_state.status == :active do
-      game_state
-      |> add_event(%{type: :game_won, player_id: winner.id, score: winner.score})
-      |> Map.put(:status, :finished)
-    else
-      game_state
-    end
+    state
+    |> Map.put(:tick_count, state.tick_count + 1)
+    |> Map.put(:last_update, now)
   end
 
-  def to_client_view(%__MODULE__{} = game_state) do
+  def get_delta_updates(state) do
+    updates = Enum.reverse(state.update_queue)
+    compressed_updates = compress_updates(updates)
+    
+    {compressed_updates, %{state | update_queue: []}}
+  end
+
+  def get_full_state(state) do
     %{
-      game_id: game_state.game_id,
-      status: game_state.status,
-      players: Enum.map(game_state.players, fn {_id, player} -> 
-        Player.to_client_view(player)
-      end),
-      match_time: game_state.match_time,
-      score_limit: game_state.score_limit,
-      time_limit: game_state.time_limit,
-      recent_events: Enum.take(game_state.events, 10)
+      game_id: state.game_id,
+      players: state.players,
+      projectiles: state.projectiles,
+      power_ups: state.power_ups,
+      tick_count: state.tick_count,
+      timestamp: DateTime.to_unix(state.last_update, :millisecond)
     }
   end
 
-  defp generate_game_id do
-    :crypto.strong_rand_bytes(8)
-    |> Base.encode16(case: :lower)
+  # Private functions
+
+  defp queue_update(state, delta) do
+    new_queue = [delta | state.update_queue]
+    Map.put(state, :update_queue, new_queue)
+  end
+
+  defp get_changed_fields(old_struct, new_struct) do
+    old_map = Map.from_struct(old_struct)
+    new_map = Map.from_struct(new_struct)
+    
+    old_map
+    |> Enum.reduce(%{}, fn {key, old_value}, acc ->
+      case Map.get(new_map, key) do
+        ^old_value -> acc
+        new_value -> Map.put(acc, key, new_value)
+      end
+    end)
+  end
+
+  defp compress_updates(updates) do
+    updates
+    |> Enum.group_by(fn update ->
+      case update do
+        %{type: :player_updated, player_id: id} -> {:player, id}
+        %{type: :projectile_updated, projectile_id: id} -> {:projectile, id}
+        _ -> :other
+      end
+    end)
+    |> Enum.flat_map(fn
+      {:other, other_updates} -> other_updates
+      {{:player, player_id}, player_updates} ->
+        merged_changes = merge_player_changes(player_updates)
+        [%{type: :player_updated, player_id: player_id, changes: merged_changes}]
+      {{:projectile, projectile_id}, projectile_updates} ->
+        merged_changes = merge_projectile_changes(projectile_updates)
+        [%{type: :projectile_updated, projectile_id: projectile_id, changes: merged_changes}]
+    end)
+  end
+
+  defp merge_player_changes(updates) do
+    Enum.reduce(updates, %{}, fn %{changes: changes}, acc ->
+      Map.merge(acc, changes)
+    end)
+  end
+
+  defp merge_projectile_changes(updates) do
+    Enum.reduce(updates, %{}, fn %{changes: changes}, acc ->
+      Map.merge(acc, changes)
+    end)
   end
 end
