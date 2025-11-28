@@ -1,219 +1,166 @@
 defmodule MassiveMultiplayerArena.Spectator.ReplaySystem do
-  @moduledoc """
-  Handles recording and playback of game replays for spectator mode.
-  Records game state snapshots at regular intervals for later playback.
-  """
-
   use GenServer
   alias MassiveMultiplayerArena.GameEngine.GameState
   require Logger
 
-  @snapshot_interval 100  # milliseconds
-  @max_replay_duration 30 * 60 * 1000  # 30 minutes in milliseconds
+  @max_replay_size 10_000
+  @cleanup_interval 60_000  # 1 minute
+  @replay_retention_time 1_800_000  # 30 minutes
 
   defstruct [
     :game_id,
-    :recording,
-    :snapshots,
+    :events,
     :start_time,
-    :last_snapshot_time,
-    :timer_ref
+    :last_cleanup,
+    :buffer_size
   ]
-
-  ## Client API
 
   def start_link(game_id) do
     GenServer.start_link(__MODULE__, game_id, name: via_tuple(game_id))
   end
 
-  def start_recording(game_id) do
-    GenServer.call(via_tuple(game_id), :start_recording)
+  def record_event(game_id, event) do
+    GenServer.cast(via_tuple(game_id), {:record_event, event})
   end
 
-  def stop_recording(game_id) do
-    GenServer.call(via_tuple(game_id), :stop_recording)
+  def get_replay(game_id, from_timestamp \\ nil) do
+    GenServer.call(via_tuple(game_id), {:get_replay, from_timestamp})
   end
 
-  def record_snapshot(game_id, %GameState{} = game_state) do
-    GenServer.cast(via_tuple(game_id), {:record_snapshot, game_state})
+  def get_replay_stats(game_id) do
+    GenServer.call(via_tuple(game_id), :get_stats)
   end
 
-  def get_replay_data(game_id) do
-    GenServer.call(via_tuple(game_id), :get_replay_data)
+  def cleanup_old_events(game_id) do
+    GenServer.cast(via_tuple(game_id), :cleanup_old_events)
   end
-
-  def get_snapshot_at_time(game_id, timestamp) do
-    GenServer.call(via_tuple(game_id), {:get_snapshot_at_time, timestamp})
-  end
-
-  ## Server Callbacks
 
   @impl true
   def init(game_id) do
+    schedule_cleanup()
+    
     state = %__MODULE__{
       game_id: game_id,
-      recording: false,
-      snapshots: [],
-      start_time: nil,
-      last_snapshot_time: nil,
-      timer_ref: nil
+      events: [],
+      start_time: System.monotonic_time(:millisecond),
+      last_cleanup: System.monotonic_time(:millisecond),
+      buffer_size: 0
     }
-    
-    Logger.info("Replay system started for game #{game_id}")
+
     {:ok, state}
   end
 
   @impl true
-  def handle_call(:start_recording, _from, state) do
-    if state.recording do
-      {:reply, {:error, :already_recording}, state}
-    else
-      now = System.monotonic_time(:millisecond)
-      timer_ref = Process.send_after(self(), :cleanup_old_snapshots, @max_replay_duration)
-      
-      new_state = %{state |
-        recording: true,
-        start_time: now,
-        last_snapshot_time: now,
-        timer_ref: timer_ref
-      }
-      
-      Logger.info("Started recording replay for game #{state.game_id}")
-      {:reply, :ok, new_state}
-    end
-  end
-
-  @impl true
-  def handle_call(:stop_recording, _from, state) do
-    if state.timer_ref do
-      Process.cancel_timer(state.timer_ref)
-    end
+  def handle_cast({:record_event, event}, state) do
+    timestamp = System.monotonic_time(:millisecond)
+    timestamped_event = Map.put(event, :timestamp, timestamp)
     
-    new_state = %{state | recording: false, timer_ref: nil}
-    Logger.info("Stopped recording replay for game #{state.game_id}")
-    {:reply, :ok, new_state}
-  end
+    new_events = [timestamped_event | state.events]
+    new_buffer_size = state.buffer_size + 1
+    
+    # Check if we need to trim the buffer
+    {trimmed_events, final_buffer_size} = 
+      if new_buffer_size > @max_replay_size do
+        trimmed = Enum.take(new_events, @max_replay_size)
+        {trimmed, @max_replay_size}
+      else
+        {new_events, new_buffer_size}
+      end
 
-  @impl true
-  def handle_call(:get_replay_data, _from, state) do
-    replay_data = %{
-      game_id: state.game_id,
-      start_time: state.start_time,
-      snapshots: Enum.reverse(state.snapshots),
-      duration: get_replay_duration(state)
+    new_state = %{state | 
+      events: trimmed_events,
+      buffer_size: final_buffer_size
     }
+
+    {:noreply, new_state}
+  end
+
+  @impl true
+  def handle_cast(:cleanup_old_events, state) do
+    current_time = System.monotonic_time(:millisecond)
+    cutoff_time = current_time - @replay_retention_time
     
-    {:reply, replay_data, state}
-  end
-
-  @impl true
-  def handle_call({:get_snapshot_at_time, timestamp}, _from, state) do
-    snapshot = find_snapshot_at_time(state.snapshots, timestamp)
-    {:reply, snapshot, state}
-  end
-
-  @impl true
-  def handle_cast({:record_snapshot, game_state}, %{recording: false} = state) do
-    # Ignore snapshots when not recording
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_cast({:record_snapshot, game_state}, state) do
-    now = System.monotonic_time(:millisecond)
-    
-    # Only record if enough time has passed since last snapshot
-    if now - state.last_snapshot_time >= @snapshot_interval do
-      snapshot = create_snapshot(game_state, now - state.start_time)
-      new_snapshots = [snapshot | state.snapshots]
-      
-      # Limit the number of snapshots to prevent memory issues
-      trimmed_snapshots = trim_snapshots(new_snapshots)
-      
-      new_state = %{state |
-        snapshots: trimmed_snapshots,
-        last_snapshot_time: now
-      }
-      
-      {:noreply, new_state}
-    else
-      {:noreply, state}
-    end
-  end
-
-  @impl true
-  def handle_info(:cleanup_old_snapshots, state) do
-    # Clean up snapshots older than max duration
-    cutoff_time = System.monotonic_time(:millisecond) - @max_replay_duration
-    
-    new_snapshots = Enum.filter(state.snapshots, fn snapshot ->
-      snapshot.absolute_time >= cutoff_time
+    cleaned_events = Enum.filter(state.events, fn event ->
+      event.timestamp > cutoff_time
     end)
     
-    new_state = %{state | snapshots: new_snapshots}
+    cleaned_count = length(cleaned_events)
+    removed_count = state.buffer_size - cleaned_count
     
-    # Schedule next cleanup
-    timer_ref = Process.send_after(self(), :cleanup_old_snapshots, @max_replay_duration)
-    new_state = %{new_state | timer_ref: timer_ref}
+    if removed_count > 0 do
+      Logger.info("Cleaned up #{removed_count} old replay events for game #{state.game_id}")
+    end
+    
+    new_state = %{state |
+      events: cleaned_events,
+      buffer_size: cleaned_count,
+      last_cleanup: current_time
+    }
     
     {:noreply, new_state}
   end
 
-  ## Private Functions
+  @impl true
+  def handle_call({:get_replay, from_timestamp}, _from, state) do
+    filtered_events = 
+      case from_timestamp do
+        nil -> Enum.reverse(state.events)
+        timestamp -> 
+          state.events
+          |> Enum.filter(&(&1.timestamp >= timestamp))
+          |> Enum.reverse()
+      end
+
+    replay_data = %{
+      game_id: state.game_id,
+      events: filtered_events,
+      start_time: state.start_time,
+      total_events: length(filtered_events)
+    }
+
+    {:reply, {:ok, replay_data}, state}
+  end
+
+  @impl true
+  def handle_call(:get_stats, _from, state) do
+    current_time = System.monotonic_time(:millisecond)
+    
+    stats = %{
+      game_id: state.game_id,
+      total_events: state.buffer_size,
+      start_time: state.start_time,
+      last_cleanup: state.last_cleanup,
+      runtime: current_time - state.start_time,
+      memory_usage: :erlang.process_info(self(), :memory)[:memory]
+    }
+    
+    {:reply, stats, state}
+  end
+
+  @impl true
+  def handle_info(:cleanup_timer, state) do
+    send(self(), :cleanup_old_events)
+    schedule_cleanup()
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:cleanup_old_events, state) do
+    {:noreply, state} = handle_cast(:cleanup_old_events, state)
+    {:noreply, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    Logger.info("Replay system for game #{state.game_id} shutting down with #{state.buffer_size} events")
+    :ok
+  end
 
   defp via_tuple(game_id) do
-    {:via, Registry, {MassiveMultiplayerArena.Registry, {__MODULE__, game_id}}}
+    {:via, Registry, {MassiveMultiplayerArena.ReplayRegistry, game_id}}
   end
 
-  defp create_snapshot(game_state, relative_time) do
-    %{
-      relative_time: relative_time,
-      absolute_time: System.monotonic_time(:millisecond),
-      players: serialize_players(game_state.players),
-      projectiles: serialize_projectiles(game_state.projectiles),
-      game_status: game_state.status,
-      score: game_state.score
-    }
-  end
-
-  defp serialize_players(players) do
-    Enum.map(players, fn {player_id, player} ->
-      %{
-        id: player_id,
-        position: player.position,
-        velocity: player.velocity,
-        health: player.health,
-        status: player.status
-      }
-    end)
-  end
-
-  defp serialize_projectiles(projectiles) do
-    Enum.map(projectiles, fn projectile ->
-      %{
-        id: projectile.id,
-        position: projectile.position,
-        velocity: projectile.velocity,
-        owner_id: projectile.owner_id
-      }
-    end)
-  end
-
-  defp find_snapshot_at_time(snapshots, timestamp) do
-    snapshots
-    |> Enum.find(fn snapshot -> snapshot.relative_time <= timestamp end)
-  end
-
-  defp trim_snapshots(snapshots) do
-    # Keep only the last 10000 snapshots (about 16.7 minutes at 100ms intervals)
-    Enum.take(snapshots, 10000)
-  end
-
-  defp get_replay_duration(state) do
-    if state.start_time do
-      System.monotonic_time(:millisecond) - state.start_time
-    else
-      0
-    end
+  defp schedule_cleanup do
+    Process.send_after(self(), :cleanup_timer, @cleanup_interval)
   end
 end
