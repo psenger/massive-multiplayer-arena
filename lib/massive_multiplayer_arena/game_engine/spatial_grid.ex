@@ -1,108 +1,124 @@
 defmodule MassiveMultiplayerArena.GameEngine.SpatialGrid do
   @moduledoc """
-  Spatial partitioning grid for efficient collision detection.
-  Divides game world into cells to reduce collision check complexity.
+  Optimized spatial grid implementation for efficient collision detection.
+  Uses dynamic cell sizing and lazy bucket creation for better memory usage.
   """
 
-  alias MassiveMultiplayerArena.GameEngine.{Player, Projectile}
-
-  @grid_size 50
-  @world_width 1000
-  @world_height 1000
-  @cells_x div(@world_width, @grid_size)
-  @cells_y div(@world_height, @grid_size)
-
-  defstruct grid: %{}, objects: %{}
+  defstruct grid: %{}, cell_size: 64, bounds: {0, 0, 1024, 1024}, stats: %{queries: 0, hits: 0}
 
   @type t :: %__MODULE__{
-    grid: %{binary() => [binary()]},
-    objects: %{binary() => {float(), float(), float()}}
+    grid: map(),
+    cell_size: integer(),
+    bounds: {number(), number(), number(), number()},
+    stats: map()
   }
 
-  @spec new() :: t()
-  def new do
-    %__MODULE_{
-      grid: initialize_grid(),
-      objects: %{}
+  @type entity :: %{
+    id: term(),
+    x: number(),
+    y: number(),
+    width: number(),
+    height: number()
+  }
+
+  def new(cell_size \\ 64, bounds \\ {0, 0, 1024, 1024}) do
+    %__MODULE__{
+      cell_size: cell_size,
+      bounds: bounds,
+      stats: %{queries: 0, hits: 0, buckets: 0}
     }
   end
 
-  @spec add_object(t(), binary(), float(), float(), float()) :: t()
-  def add_object(%__MODULE__{} = spatial_grid, object_id, x, y, radius) do
-    cells = get_cells_for_object(x, y, radius)
-    
-    updated_grid = 
-      Enum.reduce(cells, spatial_grid.grid, fn cell_key, grid ->
-        Map.update(grid, cell_key, [object_id], &[object_id | &1])
-      end)
-    
-    updated_objects = Map.put(spatial_grid.objects, object_id, {x, y, radius})
-    
-    %{spatial_grid | grid: updated_grid, objects: updated_objects}
-  end
-
-  @spec remove_object(t(), binary()) :: t()
-  def remove_object(%__MODULE__{} = spatial_grid, object_id) do
-    case Map.get(spatial_grid.objects, object_id) do
-      nil -> spatial_grid
-      {x, y, radius} ->
-        cells = get_cells_for_object(x, y, radius)
-        
-        updated_grid = 
-          Enum.reduce(cells, spatial_grid.grid, fn cell_key, grid ->
-            Map.update(grid, cell_key, [], &List.delete(&1, object_id))
-          end)
-        
-        updated_objects = Map.delete(spatial_grid.objects, object_id)
-        
-        %{spatial_grid | grid: updated_grid, objects: updated_objects}
-    end
-  end
-
-  @spec update_object(t(), binary(), float(), float(), float()) :: t()
-  def update_object(%__MODULE__{} = spatial_grid, object_id, x, y, radius) do
-    spatial_grid
-    |> remove_object(object_id)
-    |> add_object(object_id, x, y, radius)
-  end
-
-  @spec get_nearby_objects(t(), float(), float(), float()) :: [binary()]
-  def get_nearby_objects(%__MODULE__{} = spatial_grid, x, y, radius) do
-    cells = get_cells_for_object(x, y, radius)
-    
-    cells
-    |> Enum.flat_map(fn cell_key ->
-      Map.get(spatial_grid.grid, cell_key, [])
+  def insert(%__MODULE__{} = grid, entity) do
+    cells = get_entity_cells(grid, entity)
+    new_grid = Enum.reduce(cells, grid.grid, fn cell_key, acc ->
+      Map.update(acc, cell_key, [entity], &[entity | &1])
     end)
-    |> Enum.uniq()
+    
+    %{grid | grid: new_grid, stats: update_stats(grid.stats, :buckets, map_size(new_grid))}
   end
 
-  @spec clear(t()) :: t()
-  def clear(%__MODULE__{}) do
-    new()
+  def remove(%__MODULE__{} = grid, entity_id) do
+    new_grid = Enum.reduce(grid.grid, %{}, fn {cell_key, entities}, acc ->
+      filtered = Enum.reject(entities, &(&1.id == entity_id))
+      if Enum.empty?(filtered) do
+        acc
+      else
+        Map.put(acc, cell_key, filtered)
+      end
+    end)
+    
+    %{grid | grid: new_grid, stats: update_stats(grid.stats, :buckets, map_size(new_grid))}
   end
+
+  def query_region(%__MODULE__{} = grid, x, y, width, height) do
+    region = %{x: x, y: y, width: width, height: height}
+    cells = get_region_cells(grid, region)
+    
+    entities = cells
+    |> Enum.flat_map(&Map.get(grid.grid, &1, []))
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.filter(&entities_overlap?(region, &1))
+    
+    new_stats = grid.stats
+    |> update_stats(:queries, grid.stats.queries + 1)
+    |> update_stats(:hits, grid.stats.hits + length(entities))
+    
+    {entities, %{grid | stats: new_stats}}
+  end
+
+  def get_nearby_entities(%__MODULE__{} = grid, entity, radius \\ 100) do
+    x = entity.x - radius
+    y = entity.y - radius
+    width = entity.width + (2 * radius)
+    height = entity.height + (2 * radius)
+    
+    {entities, updated_grid} = query_region(grid, x, y, width, height)
+    nearby = Enum.reject(entities, &(&1.id == entity.id))
+    
+    {nearby, updated_grid}
+  end
+
+  def clear(%__MODULE__{} = grid) do
+    %{grid | grid: %{}, stats: %{queries: 0, hits: 0, buckets: 0}}
+  end
+
+  def get_stats(%__MODULE__{stats: stats}), do: stats
 
   # Private functions
-
-  defp initialize_grid do
-    for x <- 0..(@cells_x - 1),
-        y <- 0..(@cells_y - 1),
-        into: %{} do
-      {cell_key(x, y), []}
-    end
-  end
-
-  defp get_cells_for_object(x, y, radius) do
-    min_x = max(0, div(trunc(x - radius), @grid_size))
-    max_x = min(@cells_x - 1, div(trunc(x + radius), @grid_size))
-    min_y = max(0, div(trunc(y - radius), @grid_size))
-    max_y = min(@cells_y - 1, div(trunc(y + radius), @grid_size))
+  
+  defp get_entity_cells(%__MODULE__{cell_size: cell_size}, entity) do
+    left = div(trunc(entity.x), cell_size)
+    right = div(trunc(entity.x + entity.width), cell_size)
+    top = div(trunc(entity.y), cell_size)
+    bottom = div(trunc(entity.y + entity.height), cell_size)
     
-    for cell_x <- min_x..max_x,
-        cell_y <- min_y..max_y do
-      cell_key(cell_x, cell_y)
+    for x <- left..right, y <- top..bottom do
+      {x, y}
     end
   end
 
-  defp cell_key(x, y), do: "#{x},#{y}"
+  defp get_region_cells(%__MODULE__{cell_size: cell_size}, region) do
+    left = div(trunc(region.x), cell_size)
+    right = div(trunc(region.x + region.width), cell_size)
+    top = div(trunc(region.y), cell_size)
+    bottom = div(trunc(region.y + region.height), cell_size)
+    
+    for x <- left..right, y <- top..bottom do
+      {x, y}
+    end
+  end
+
+  defp entities_overlap?(region1, region2) do
+    not (
+      region1.x + region1.width < region2.x or
+      region2.x + region2.width < region1.x or
+      region1.y + region1.height < region2.y or
+      region2.y + region2.height < region1.y
+    )
+  end
+
+  defp update_stats(stats, key, value) do
+    Map.put(stats, key, value)
+  end
 end

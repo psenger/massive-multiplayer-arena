@@ -1,136 +1,177 @@
 defmodule MassiveMultiplayerArena.GameEngine.Collision do
   @moduledoc """
-  Handles collision detection between game entities using spatial partitioning.
+  Enhanced collision detection system using optimized spatial partitioning.
+  Supports broad-phase and narrow-phase collision detection with performance monitoring.
   """
 
-  alias MassiveMultiplayerArena.GameEngine.{
-    Player,
-    Projectile,
-    PowerUp,
-    SpatialGrid
+  alias MassiveMultiplayerArena.GameEngine.{Player, Projectile, PowerUp, SpatialGrid}
+  
+  @type collision_result :: %{
+    entity1: map(),
+    entity2: map(),
+    collision_point: {number(), number()},
+    normal: {number(), number()},
+    penetration: number()
   }
 
-  @type collision_result :: {
-    :collision,
-    {entity_type(), binary()},
-    {entity_type(), binary()}
+  @collision_layers %{
+    player: [:player, :projectile, :power_up, :wall],
+    projectile: [:player, :wall],
+    power_up: [:player],
+    wall: [:player, :projectile]
   }
 
-  @type entity_type :: :player | :projectile | :power_up
-
-  @spec check_collisions(SpatialGrid.t(), map(), map(), map()) :: [collision_result()]
-  def check_collisions(spatial_grid, players, projectiles, power_ups) do
-    all_entities = %{}
-                  |> Map.merge(for {id, player} <- players, into: %{}, do: {id, {:player, player}})
-                  |> Map.merge(for {id, projectile} <- projectiles, into: %{}, do: {id, {:projectile, projectile}})
-                  |> Map.merge(for {id, power_up} <- power_ups, into: %{}, do: {id, {:power_up, power_up}})
-
-    all_entities
-    |> Enum.flat_map(fn {entity_id, {entity_type, entity}} ->
-      {x, y} = get_entity_position(entity)
-      radius = get_entity_radius(entity_type)
-      
-      nearby_ids = SpatialGrid.get_nearby_objects(spatial_grid, x, y, radius)
-      
-      nearby_ids
-      |> Enum.reject(&(&1 == entity_id))
-      |> Enum.filter_map(
-        fn other_id -> Map.has_key?(all_entities, other_id) end,
-        fn other_id ->
-          {other_type, other_entity} = all_entities[other_id]
-          
-          if should_check_collision(entity_type, other_type) and
-             entities_colliding?(entity, other_entity, entity_type, other_type) do
-            {:collision, {entity_type, entity_id}, {other_type, other_id}}
-          else
-            nil
-          end
-        end
-      )
-      |> Enum.reject(&is_nil/1)
-    end)
-    |> Enum.uniq_by(fn {:collision, {_, id1}, {_, id2}} ->
-      Enum.sort([id1, id2])
-    end)
+  def detect_collisions(game_state) do
+    # Rebuild spatial grid for current frame
+    grid = build_spatial_grid(game_state)
+    
+    # Detect all collision pairs
+    collision_pairs = find_collision_pairs(grid, game_state)
+    
+    # Perform narrow-phase collision detection
+    collisions = Enum.map(collision_pairs, &detailed_collision_check/1)
+    |> Enum.filter(& &1 != nil)
+    
+    # Update performance metrics
+    metrics = calculate_performance_metrics(grid, collision_pairs, collisions)
+    
+    %{
+      collisions: collisions,
+      metrics: metrics,
+      spatial_grid: grid
+    }
   end
 
-  @spec check_player_collisions(Player.t(), [Player.t()]) :: [Player.t()]
-  def check_player_collisions(%Player{} = player, other_players) do
-    Enum.filter(other_players, fn other_player ->
-      player.id != other_player.id and players_colliding?(player, other_player)
-    end)
-  end
-
-  @spec check_projectile_collisions(Projectile.t(), [Player.t()]) :: [Player.t()]
-  def check_projectile_collisions(%Projectile{} = projectile, players) do
-    Enum.filter(players, fn player ->
-      projectile.owner_id != player.id and
-      projectile_player_collision?(projectile, player)
-    end)
-  end
-
-  @spec check_power_up_collisions(PowerUp.t(), [Player.t()]) :: [Player.t()]
-  def check_power_up_collisions(%PowerUp{} = power_up, players) do
-    Enum.filter(players, &power_up_player_collision?(power_up, &1))
-  end
-
-  @spec players_colliding?(Player.t(), Player.t()) :: boolean()
-  def players_colliding?(%Player{} = p1, %Player{} = p2) do
-    distance_squared = 
-      :math.pow(p1.x - p2.x, 2) + :math.pow(p1.y - p2.y, 2)
-    
-    collision_distance_squared = :math.pow(p1.radius + p2.radius, 2)
-    
-    distance_squared <= collision_distance_squared
-  end
-
-  @spec projectile_player_collision?(Projectile.t(), Player.t()) :: boolean()
-  def projectile_player_collision?(%Projectile{} = proj, %Player{} = player) do
-    distance_squared = 
-      :math.pow(proj.x - player.x, 2) + :math.pow(proj.y - player.y, 2)
-    
-    collision_distance_squared = :math.pow(proj.radius + player.radius, 2)
-    
-    distance_squared <= collision_distance_squared
-  end
-
-  @spec power_up_player_collision?(PowerUp.t(), Player.t()) :: boolean()
-  def power_up_player_collision?(%PowerUp{} = power_up, %Player{} = player) do
-    distance_squared = 
-      :math.pow(power_up.x - player.x, 2) + :math.pow(power_up.y - player.y, 2)
-    
-    collision_distance_squared = :math.pow(power_up.radius + player.radius, 2)
-    
-    distance_squared <= collision_distance_squared
+  def check_collision(entity1, entity2) do
+    if entities_overlap?(entity1, entity2) do
+      detailed_collision_check({entity1, entity2})
+    else
+      nil
+    end
   end
 
   # Private functions
-
-  defp get_entity_position(%Player{x: x, y: y}), do: {x, y}
-  defp get_entity_position(%Projectile{x: x, y: y}), do: {x, y}
-  defp get_entity_position(%PowerUp{x: x, y: y}), do: {x, y}
-
-  defp get_entity_radius(:player), do: 15.0
-  defp get_entity_radius(:projectile), do: 3.0
-  defp get_entity_radius(:power_up), do: 10.0
-
-  defp should_check_collision(:player, :player), do: true
-  defp should_check_collision(:projectile, :player), do: true
-  defp should_check_collision(:player, :projectile), do: true
-  defp should_check_collision(:power_up, :player), do: true
-  defp should_check_collision(:player, :power_up), do: true
-  defp should_check_collision(_, _), do: false
-
-  defp entities_colliding?(entity1, entity2, type1, type2) do
-    {x1, y1} = get_entity_position(entity1)
-    {x2, y2} = get_entity_position(entity2)
+  
+  defp build_spatial_grid(game_state) do
+    grid = SpatialGrid.new(64, {0, 0, game_state.world.width, game_state.world.height})
     
-    r1 = get_entity_radius(type1)
-    r2 = get_entity_radius(type2)
+    # Insert all collidable entities
+    entities = get_all_collidable_entities(game_state)
     
-    distance_squared = :math.pow(x1 - x2, 2) + :math.pow(y1 - y2, 2)
-    collision_distance_squared = :math.pow(r1 + r2, 2)
+    Enum.reduce(entities, grid, fn entity, acc_grid ->
+      SpatialGrid.insert(acc_grid, entity)
+    end)
+  end
+
+  defp get_all_collidable_entities(game_state) do
+    players = Map.values(game_state.players)
+    |> Enum.map(&add_collision_layer(&1, :player))
     
-    distance_squared <= collision_distance_squared
+    projectiles = game_state.projectiles
+    |> Enum.map(&add_collision_layer(&1, :projectile))
+    
+    power_ups = game_state.power_ups
+    |> Enum.map(&add_collision_layer(&1, :power_up))
+    
+    walls = game_state.world.walls
+    |> Enum.map(&add_collision_layer(&1, :wall))
+    
+    players ++ projectiles ++ power_ups ++ walls
+  end
+
+  defp add_collision_layer(entity, layer) do
+    Map.put(entity, :collision_layer, layer)
+  end
+
+  defp find_collision_pairs(grid, _game_state) do
+    # Get all entities and check each against nearby entities
+    all_entities = grid.grid
+    |> Map.values()
+    |> List.flatten()
+    |> Enum.uniq_by(& &1.id)
+    
+    Enum.reduce(all_entities, [], fn entity, acc ->
+      {nearby, _updated_grid} = SpatialGrid.get_nearby_entities(grid, entity)
+      
+      valid_pairs = nearby
+      |> Enum.filter(&can_collide?(entity, &1))
+      |> Enum.map(&{entity, &1})
+      
+      acc ++ valid_pairs
+    end)
+    |> Enum.uniq()
+  end
+
+  defp can_collide?(entity1, entity2) do
+    layer1 = entity1.collision_layer
+    layer2 = entity2.collision_layer
+    
+    case Map.get(@collision_layers, layer1) do
+      nil -> false
+      allowed_layers -> layer2 in allowed_layers
+    end
+  end
+
+  defp detailed_collision_check({entity1, entity2}) do
+    if entities_overlap?(entity1, entity2) do
+      collision_point = calculate_collision_point(entity1, entity2)
+      normal = calculate_collision_normal(entity1, entity2)
+      penetration = calculate_penetration(entity1, entity2)
+      
+      %{
+        entity1: entity1,
+        entity2: entity2,
+        collision_point: collision_point,
+        normal: normal,
+        penetration: penetration,
+        timestamp: System.monotonic_time(:millisecond)
+      }
+    else
+      nil
+    end
+  end
+
+  defp entities_overlap?(entity1, entity2) do
+    not (
+      entity1.x + entity1.width < entity2.x or
+      entity2.x + entity2.width < entity1.x or
+      entity1.y + entity1.height < entity2.y or
+      entity2.y + entity2.height < entity1.y
+    )
+  end
+
+  defp calculate_collision_point(entity1, entity2) do
+    x = (max(entity1.x, entity2.x) + min(entity1.x + entity1.width, entity2.x + entity2.width)) / 2
+    y = (max(entity1.y, entity2.y) + min(entity1.y + entity1.height, entity2.y + entity2.height)) / 2
+    {x, y}
+  end
+
+  defp calculate_collision_normal(entity1, entity2) do
+    dx = (entity2.x + entity2.width / 2) - (entity1.x + entity1.width / 2)
+    dy = (entity2.y + entity2.height / 2) - (entity1.y + entity1.height / 2)
+    
+    length = :math.sqrt(dx * dx + dy * dy)
+    if length > 0 do
+      {dx / length, dy / length}
+    else
+      {1.0, 0.0}
+    end
+  end
+
+  defp calculate_penetration(entity1, entity2) do
+    overlap_x = min(entity1.x + entity1.width, entity2.x + entity2.width) - max(entity1.x, entity2.x)
+    overlap_y = min(entity1.y + entity1.height, entity2.y + entity2.height) - max(entity1.y, entity2.y)
+    min(overlap_x, overlap_y)
+  end
+
+  defp calculate_performance_metrics(grid, collision_pairs, collisions) do
+    spatial_stats = SpatialGrid.get_stats(grid)
+    
+    %{
+      broad_phase_pairs: length(collision_pairs),
+      narrow_phase_collisions: length(collisions),
+      spatial_grid_stats: spatial_stats,
+      efficiency_ratio: if(length(collision_pairs) > 0, do: length(collisions) / length(collision_pairs), else: 0)
+    }
   end
 end
