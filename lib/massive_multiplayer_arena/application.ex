@@ -1,42 +1,39 @@
 defmodule MassiveMultiplayerArena.Application do
-  @moduledoc """
-  The MassiveMultiplayerArena Application callback.
-  """
+  @moduledoc false
 
   use Application
 
   @impl true
   def start(_type, _args) do
     children = [
-      # Start the Telemetry supervisor
-      MassiveMultiplayerArenaWeb.Telemetry,
-      # Start the Ecto repository
-      MassiveMultiplayerArena.Repo,
-      # Start the PubSub system
-      {Phoenix.PubSub, name: MassiveMultiplayerArena.PubSub},
-      # Start Finch
-      {Finch, name: MassiveMultiplayerArena.Finch},
-      # Start the Endpoint (http/https)
-      MassiveMultiplayerArenaWeb.Endpoint,
-      # Game Engine Supervisors
-      MassiveMultiplayerArena.GameEngine.Supervisor,
-      # Matchmaking System
-      MassiveMultiplayerArena.Matchmaking.Supervisor,
-      # Spectator System
-      MassiveMultiplayerArena.Spectator.Supervisor
+      # Registry for game processes
+      {Registry, keys: :unique, name: MassiveMultiplayerArena.GameRegistry},
+      
+      # Game server pool for load distribution
+      MassiveMultiplayerArena.GameEngine.ServerPool,
+      
+      # Matchmaking system
+      MassiveMultiplayerArena.Matchmaking.Matchmaker,
+      MassiveMultiplayerArena.Matchmaking.SkillRating,
+      MassiveMultiplayerArena.Matchmaking.LatencyTracker,
+      MassiveMultiplayerArena.Matchmaking.RegionManager,
+      
+      # Spectator and streaming services
+      MassiveMultiplayerArena.Spectator.SpectatorRoom,
+      MassiveMultiplayerArena.Spectator.ReplayManager,
+      MassiveMultiplayerArena.Spectator.StreamManager,
+      
+      # Task supervisor for async operations
+      {Task.Supervisor, name: MassiveMultiplayerArena.TaskSupervisor},
+      
+      # Dynamic supervisor for game instances
+      {DynamicSupervisor, 
+       strategy: :one_for_one, 
+       name: MassiveMultiplayerArena.GameSupervisor,
+       max_children: 1000}
     ]
 
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
     opts = [strategy: :one_for_one, name: MassiveMultiplayerArena.Supervisor]
     Supervisor.start_link(children, opts)
-  end
-
-  # Tell Phoenix to update the endpoint configuration
-  # whenever the application is updated.
-  @impl true
-  def config_change(changed, _new, removed) do
-    MassiveMultiplayerArenaWeb.Endpoint.config_change(changed, removed)
-    :ok
   end
 end
