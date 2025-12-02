@@ -1,170 +1,192 @@
 defmodule MassiveMultiplayerArena.GameEngine.BatchProcessor do
   @moduledoc """
-  Processes game operations in batches to improve performance and reduce overhead.
-  Handles batched updates for player movements, combat actions, and state synchronization.
+  Processes game state updates in batches to improve performance
+  and reduce network overhead.
   """
 
   use GenServer
   require Logger
 
-  @batch_size 100
-  @flush_interval 16  # ~60 FPS
+  @batch_interval 16  # ~60 FPS
+  @max_batch_size 100
 
   defstruct [
-    :game_id,
-    :pending_operations,
     :batch_timer,
-    :stats
+    :pending_updates,
+    :subscribers,
+    :batch_count,
+    :processing
   ]
 
-  def start_link(game_id) do
-    GenServer.start_link(__MODULE__, game_id, name: via_tuple(game_id))
+  # Client API
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def add_operation(game_id, operation) do
-    GenServer.cast(via_tuple(game_id), {:add_operation, operation})
+  def add_update(update) do
+    GenServer.cast(__MODULE__, {:add_update, update})
   end
 
-  def force_flush(game_id) do
-    GenServer.call(via_tuple(game_id), :force_flush)
+  def subscribe(pid) do
+    GenServer.cast(__MODULE__, {:subscribe, pid})
   end
 
-  def get_stats(game_id) do
-    GenServer.call(via_tuple(game_id), :get_stats)
+  def unsubscribe(pid) do
+    GenServer.cast(__MODULE__, {:unsubscribe, pid})
   end
 
-  # Server callbacks
+  def get_stats do
+    GenServer.call(__MODULE__, :get_stats)
+  end
+
+  # Server Callbacks
 
   @impl true
-  def init(game_id) do
-    state = %__MODULE__{
-      game_id: game_id,
-      pending_operations: [],
-      batch_timer: schedule_flush(),
-      stats: %{batches_processed: 0, operations_processed: 0}
-    }
+  def init(_opts) do
+    timer_ref = Process.send_after(self(), :process_batch, @batch_interval)
     
-    Logger.debug("BatchProcessor started for game #{game_id}")
+    state = %__MODULE__{
+      batch_timer: timer_ref,
+      pending_updates: [],
+      subscribers: MapSet.new(),
+      batch_count: 0,
+      processing: false
+    }
+
     {:ok, state}
   end
 
   @impl true
-  def handle_cast({:add_operation, operation}, state) do
-    %{pending_operations: pending, batch_timer: timer} = state
-    
-    updated_pending = [operation | pending]
-    
-    # Flush immediately if batch is full
-    new_state = if length(updated_pending) >= @batch_size do
-      Process.cancel_timer(timer)
-      process_batch(%{state | pending_operations: updated_pending})
-    else
-      %{state | pending_operations: updated_pending}
-    end
-    
-    {:noreply, new_state}
+  def handle_cast({:add_update, update}, %{processing: true} = state) do
+    # Avoid race condition by queuing updates during processing
+    {:noreply, %{state | pending_updates: [update | state.pending_updates]}}
   end
 
-  @impl true
-  def handle_call(:force_flush, _from, state) do
-    %{batch_timer: timer} = state
-    Process.cancel_timer(timer)
+  def handle_cast({:add_update, update}, state) do
+    new_updates = [update | state.pending_updates]
     
-    new_state = process_batch(state)
-    {:reply, :ok, new_state}
+    # Process immediately if batch is full
+    if length(new_updates) >= @max_batch_size do
+      Process.cancel_timer(state.batch_timer)
+      send(self(), :process_batch)
+      {:noreply, %{state | pending_updates: new_updates}}
+    else
+      {:noreply, %{state | pending_updates: new_updates}}
+    end
+  end
+
+  def handle_cast({:subscribe, pid}, state) do
+    Process.monitor(pid)
+    new_subscribers = MapSet.put(state.subscribers, pid)
+    {:noreply, %{state | subscribers: new_subscribers}}
+  end
+
+  def handle_cast({:unsubscribe, pid}, state) do
+    new_subscribers = MapSet.delete(state.subscribers, pid)
+    {:noreply, %{state | subscribers: new_subscribers}}
   end
 
   @impl true
   def handle_call(:get_stats, _from, state) do
-    {:reply, state.stats, state}
+    stats = %{
+      pending_updates: length(state.pending_updates),
+      subscribers: MapSet.size(state.subscribers),
+      batch_count: state.batch_count,
+      processing: state.processing
+    }
+    {:reply, stats, state}
   end
 
   @impl true
-  def handle_info(:flush_batch, state) do
-    new_state = process_batch(state)
-    {:noreply, new_state}
-  end
-
-  # Private functions
-
-  defp process_batch(%{pending_operations: []} = state) do
-    %{state | batch_timer: schedule_flush()}
-  end
-
-  defp process_batch(state) do
-    %{pending_operations: operations, game_id: game_id, stats: stats} = state
+  def handle_info(:process_batch, state) do
+    new_state = process_current_batch(state)
     
-    # Group operations by type for efficient processing
-    grouped_operations = group_operations(operations)
+    # Schedule next batch
+    timer_ref = Process.send_after(self(), :process_batch, @batch_interval)
     
-    # Process each group
-    Enum.each(grouped_operations, fn {type, ops} ->
-      process_operation_group(game_id, type, ops)
-    end)
-    
-    # Update stats
-    updated_stats = %{
-      batches_processed: stats.batches_processed + 1,
-      operations_processed: stats.operations_processed + length(operations)
-    }
-    
-    Logger.debug("Processed batch of #{length(operations)} operations for game #{game_id}")
-    
-    %{state | 
-      pending_operations: [], 
-      batch_timer: schedule_flush(),
-      stats: updated_stats
-    }
+    {:noreply, %{new_state | batch_timer: timer_ref, processing: false}}
   end
 
-  defp group_operations(operations) do
-    Enum.group_by(operations, fn
-      {:player_move, _} -> :movement
-      {:player_attack, _} -> :combat
-      {:player_ability, _} -> :abilities
-      {:projectile_update, _} -> :projectiles
-      {:power_up_spawn, _} -> :power_ups
-      _ -> :misc
-    end)
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    # Remove dead subscriber
+    new_subscribers = MapSet.delete(state.subscribers, pid)
+    {:noreply, %{state | subscribers: new_subscribers}}
   end
 
-  defp process_operation_group(game_id, :movement, operations) do
-    movements = Enum.map(operations, fn {:player_move, data} -> data end)
-    MassiveMultiplayerArena.GameEngine.GameServer.batch_move_players(game_id, movements)
+  # Private Functions
+
+  defp process_current_batch(%{pending_updates: []} = state) do
+    state
   end
 
-  defp process_operation_group(game_id, :combat, operations) do
-    attacks = Enum.map(operations, fn {:player_attack, data} -> data end)
-    MassiveMultiplayerArena.GameEngine.CombatManager.batch_process_attacks(game_id, attacks)
+  defp process_current_batch(state) do
+    %{state | processing: true}
+    |> apply_batch_processing()
+    |> broadcast_to_subscribers()
+    |> update_batch_stats()
   end
 
-  defp process_operation_group(game_id, :abilities, operations) do
-    abilities = Enum.map(operations, fn {:player_ability, data} -> data end)
-    MassiveMultiplayerArena.GameEngine.GameServer.batch_use_abilities(game_id, abilities)
+  defp apply_batch_processing(state) do
+    try do
+      # Reverse to maintain chronological order
+      updates = Enum.reverse(state.pending_updates)
+      
+      # Group and deduplicate updates
+      processed_batch = 
+        updates
+        |> group_updates_by_entity()
+        |> merge_duplicate_updates()
+        |> validate_updates()
+      
+      %{state | pending_updates: [], processed_batch: processed_batch}
+    rescue
+      error ->
+        Logger.error("Batch processing failed: #{inspect(error)}")
+        %{state | pending_updates: [], processed_batch: []}
+    end
   end
 
-  defp process_operation_group(game_id, :projectiles, operations) do
-    updates = Enum.map(operations, fn {:projectile_update, data} -> data end)
-    MassiveMultiplayerArena.GameEngine.GameServer.batch_update_projectiles(game_id, updates)
-  end
-
-  defp process_operation_group(game_id, :power_ups, operations) do
-    spawns = Enum.map(operations, fn {:power_up_spawn, data} -> data end)
-    MassiveMultiplayerArena.GameEngine.PowerUpManager.batch_spawn_power_ups(game_id, spawns)
-  end
-
-  defp process_operation_group(game_id, :misc, operations) do
-    # Handle miscellaneous operations individually
-    Enum.each(operations, fn operation ->
-      MassiveMultiplayerArena.GameEngine.GameServer.handle_operation(game_id, operation)
+  defp group_updates_by_entity(updates) do
+    Enum.group_by(updates, fn update ->
+      Map.get(update, :entity_id, :global)
     end)
   end
 
-  defp schedule_flush do
-    Process.send_after(self(), :flush_batch, @flush_interval)
+  defp merge_duplicate_updates(grouped_updates) do
+    Enum.map(grouped_updates, fn {entity_id, updates} ->
+      merged_update = Enum.reduce(updates, %{}, fn update, acc ->
+        Map.merge(acc, update)
+      end)
+      
+      Map.put(merged_update, :entity_id, entity_id)
+    end)
   end
 
-  defp via_tuple(game_id) do
-    {:via, Registry, {MassiveMultiplayerArena.GameRegistry, {:batch_processor, game_id}}}
+  defp validate_updates(updates) do
+    Enum.filter(updates, fn update ->
+      is_map(update) and Map.has_key?(update, :entity_id)
+    end)
+  end
+
+  defp broadcast_to_subscribers(%{processed_batch: []} = state) do
+    state
+  end
+
+  defp broadcast_to_subscribers(state) do
+    batch_message = {:batch_update, state.processed_batch}
+    
+    # Safely broadcast to all subscribers
+    Enum.each(state.subscribers, fn subscriber_pid ->
+      if Process.alive?(subscriber_pid) do
+        send(subscriber_pid, batch_message)
+      end
+    end)
+    
+    state
+  end
+
+  defp update_batch_stats(state) do
+    %{state | batch_count: state.batch_count + 1}
   end
 end
