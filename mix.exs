@@ -34,7 +34,7 @@ defmodule MassiveMultiplayerArena.MixProject do
       {:jason, "~> 1.2"},
       {:plug_cowboy, "~> 2.5"},
       {:libcluster, "~> 3.3"},
-      {:presence, "~> 1.1"},
+      {:presence, "~> 0.9.1"},
       {:gen_stage, "~> 1.2"}
     ]
   end

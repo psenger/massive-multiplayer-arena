@@ -14,15 +14,14 @@ defmodule MassiveMultiplayerArena.Application do
       
       # Matchmaking system
       MassiveMultiplayerArena.Matchmaking.Matchmaker,
-      MassiveMultiplayerArena.Matchmaking.SkillRating,
-      MassiveMultiplayerArena.Matchmaking.LatencyTracker,
       MassiveMultiplayerArena.Matchmaking.RegionManager,
       
-      # Spectator and streaming services
-      MassiveMultiplayerArena.Spectator.SpectatorRoom,
+      # Registry for spectator processes
+      {Registry, keys: :unique, name: MassiveMultiplayerArena.SpectatorRegistry},
+
+      # ReplayManager (DynamicSupervisor for replay systems)
       MassiveMultiplayerArena.Spectator.ReplayManager,
-      MassiveMultiplayerArena.Spectator.StreamManager,
-      
+
       # Task supervisor for async operations
       {Task.Supervisor, name: MassiveMultiplayerArena.TaskSupervisor},
       

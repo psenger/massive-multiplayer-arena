@@ -193,18 +193,21 @@ defmodule MassiveMultiplayerArena.GameEngine.CombatManager do
   defp get_cast_time(:lightning), do: 800
   defp get_cast_time(_), do: 1500
   
-  defp apply_ability_effect(game_state, _player_id, :fireball, {x, y}) do
+  defp apply_ability_effect(game_state, player_id, :fireball, {x, y}) do
     # Create explosion projectile
     projectile = %Projectile{
       id: generate_id(),
-      x: x,
-      y: y,
-      type: :explosion,
+      weapon_type: :explosion,
+      position: {x, y},
+      velocity: {0, 0},
+      size: 100,
       damage: 75,
-      radius: 100,
-      duration: 500
+      range: 0,
+      distance_traveled: 0,
+      created_at: System.monotonic_time(:millisecond),
+      owner_id: player_id
     }
-    
+
     %{game_state | projectiles: [projectile | game_state.projectiles]}
   end
   

@@ -12,14 +12,14 @@ defmodule MassiveMultiplayerArena.GameEngine.GameServer do
 
   def init(game_id) do
     Logger.info("Starting game server for game #{game_id}")
-    
+
     state = %{
       game_id: game_id,
-      game_state: GameState.new(),
+      game_state: GameState.new(game_id),
       tick_timer: schedule_tick(),
       connected_players: MapSet.new()
     }
-    
+
     {:ok, state}
   end
 

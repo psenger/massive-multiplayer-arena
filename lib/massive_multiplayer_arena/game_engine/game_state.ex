@@ -48,10 +48,25 @@ defmodule MassiveMultiplayerArena.GameEngine.GameState do
   def add_player(state, player) do
     new_players = Map.put(state.players, player.id, player)
     delta = %{type: :player_joined, player_id: player.id, player: player}
-    
+
     state
     |> Map.put(:players, new_players)
     |> queue_update(delta)
+  end
+
+  def update_player_input(state, player_id, input) do
+    case Map.get(state.players, player_id) do
+      nil -> state
+      player ->
+        # Update player velocity based on input
+        velocity = %{
+          x: Map.get(input, :move_x, 0) * 200,
+          y: Map.get(input, :move_y, 0) * 200
+        }
+        updated_player = %{player | velocity: velocity}
+        new_players = Map.put(state.players, player_id, updated_player)
+        %{state | players: new_players}
+    end
   end
 
   def update_player(state, player_id, updates) do

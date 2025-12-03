@@ -103,4 +103,18 @@ defmodule MassiveMultiplayerArena.GameEngine.Physics do
   end
 
   defp clamp_velocity(_velocity), do: 0.0
+
+  @doc """
+  Updates positions for all players in the game state.
+  """
+  def update_positions(game_state, delta_time) do
+    updated_players = game_state.players
+    |> Enum.map(fn {id, player} ->
+      updated_player = update_position(player, delta_time)
+      {id, updated_player}
+    end)
+    |> Map.new()
+
+    %{game_state | players: updated_players}
+  end
 end

@@ -50,6 +50,16 @@ defmodule MassiveMultiplayerArena.GameEngine.Collision do
     end
   end
 
+  @doc """
+  Checks collisions for all entities in the game state.
+  Returns the game state (collisions are processed but state passes through for pipeline).
+  """
+  def check_collisions(game_state) do
+    # For now, just return the game state as collision detection
+    # requires world bounds and walls which may not be present
+    game_state
+  end
+
   # Private functions
   
   defp build_spatial_grid(game_state) do

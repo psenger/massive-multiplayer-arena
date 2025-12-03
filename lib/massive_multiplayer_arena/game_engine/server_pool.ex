@@ -113,15 +113,17 @@ defmodule MassiveMultiplayerArena.GameEngine.ServerPool do
   # Private functions
 
   defp start_server_pool do
-    Enum.map(1..@pool_size, fn _i ->
-      {:ok, pid} = MassiveMultiplayerArena.GameEngine.GameServer.start_link([])
+    Enum.map(1..@pool_size, fn i ->
+      game_id = "pool_server_#{i}_#{:erlang.unique_integer([:positive])}"
+      {:ok, pid} = MassiveMultiplayerArena.GameEngine.GameServer.start_link(game_id)
       pid
     end)
   end
 
   defp start_additional_servers(count) do
-    Enum.map(1..count, fn _i ->
-      {:ok, pid} = MassiveMultiplayerArena.GameEngine.GameServer.start_link([])
+    Enum.map(1..count, fn i ->
+      game_id = "pool_server_extra_#{i}_#{:erlang.unique_integer([:positive])}"
+      {:ok, pid} = MassiveMultiplayerArena.GameEngine.GameServer.start_link(game_id)
       pid
     end)
   end
